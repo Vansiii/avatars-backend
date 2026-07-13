@@ -1,9 +1,11 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 
 from app.database.database import engine, Base, SessionLocal
 from app.database.seeding import seed_styles
+from app.media_paths import MEDIA_ROOT
 
 # Import models to ensure they are registered with SQLAlchemy Base metadata
 from app.models.user import User
@@ -49,6 +51,9 @@ app.add_middleware(
 app.include_router(auth_router, prefix="/api/v1")
 app.include_router(styles_router, prefix="/api/v1")
 app.include_router(generations_router, prefix="/api/v1")
+
+# Avatares generados: servidos localmente (sin S3/CDN en el Alpha)
+app.mount("/media", StaticFiles(directory=str(MEDIA_ROOT)), name="media")
 
 @app.get("/")
 def read_root():

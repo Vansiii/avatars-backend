@@ -10,6 +10,10 @@ from app.models.style import Style
 from app.models.generation import GenerationRequest, GeneratedAvatar
 from app.schemas.generation import GenerationSubmitResponse, HistoryItemResponse
 from app.auth.dependencies import get_current_user
+from app.media_paths import AVATARS_DIR
+from app.services.image_provider import generate_image, NSFWRejected, ProviderError
+from app.services.watermark import apply_watermark
+from app.services.security_log import log_nsfw_rejection
 
 router = APIRouter()
 
@@ -42,17 +46,25 @@ manager = ConnectionManager()
 
 # Background Generation Task
 async def generate_avatar_background(request_id: uuid.UUID):
-    await asyncio.sleep(1) # delay start
     db = SessionLocal()
     try:
         req = db.query(GenerationRequest).filter(GenerationRequest.id == request_id).first()
         if not req:
             return
-            
+
         req.status = "processing"
         db.commit()
-        
-        # Step 1: Validate input (20% progress)
+
+        style = db.query(Style).filter(Style.id == req.style_id).first()
+        prompt_parts = [p for p in [style.base_prompt if style else None, req.prompt] if p]
+        full_prompt = ", ".join(prompt_parts) if prompt_parts else "professional portrait avatar, studio lighting"
+        # NOTA: en este Alpha la foto subida por el usuario NO condiciona la generación
+        # todavía (Pollinations "kontext" para imagen->imagen requiere una URL pública
+        # del archivo de entrada, y aún no hay storage público). Si solo se subió una
+        # foto sin prompt, se genera un avatar del estilo elegido, no personalizado.
+
+        # Paso 1: validar entrada (20%). El filtro NSFW de Pollinations (safe=true)
+        # se aplica dentro de la misma llamada de generación, no como paso separado.
         await manager.broadcast(str(request_id), {
             "event": "generation_progress",
             "data": {
@@ -62,90 +74,87 @@ async def generate_avatar_background(request_id: uuid.UUID):
                 "message": "Validando entrada..."
             }
         })
-        await asyncio.sleep(2)
-        
-        # Step 2: Apply style (50% progress)
+
+        # Paso 2: generar variaciones con IA (50%)
         await manager.broadcast(str(request_id), {
             "event": "generation_progress",
             "data": {
                 "request_id": str(request_id),
                 "status": "processing",
                 "progress": 50,
-                "message": "Aplicando estilo visual..."
+                "message": "Generando avatar con IA..."
             }
         })
-        await asyncio.sleep(2.5)
-        
-        # Step 3: Upscaling & Watermarking (80% progress)
+
+        try:
+            tasks = [generate_image(full_prompt) for _ in range(req.variations)]
+            raw_images = await asyncio.gather(*tasks)
+        except NSFWRejected as exc:
+            log_nsfw_rejection(req.user_id, "prompt" if req.prompt else "file", str(exc))
+            req.status = "failed"
+            db.commit()
+            await manager.broadcast(str(request_id), {
+                "event": "generation_failed",
+                "data": {
+                    "request_id": str(request_id),
+                    "status": "failed",
+                    "error_code": "GEN_004",
+                    "message": "El contenido solicitado no cumple con nuestras políticas de uso."
+                }
+            })
+            return
+        except ProviderError:
+            req.status = "failed"
+            db.commit()
+            await manager.broadcast(str(request_id), {
+                "event": "generation_failed",
+                "data": {
+                    "request_id": str(request_id),
+                    "status": "failed",
+                    "message": "El proveedor de IA no respondió. Intenta nuevamente."
+                }
+            })
+            return
+
+        # Paso 3: watermark + guardado (80%)
         await manager.broadcast(str(request_id), {
             "event": "generation_progress",
             "data": {
                 "request_id": str(request_id),
                 "status": "processing",
                 "progress": 80,
-                "message": "Optimizando imagen y escalando..."
+                "message": "Aplicando marca de agua y optimizando..."
             }
         })
-        await asyncio.sleep(2)
-        
-        style = db.query(Style).filter(Style.id == req.style_id).first()
-        category = style.category if style else "professional"
-        
-        # Curated Unsplash images that represent high-quality avatares
-        placeholders = {
-            "professional": [
-                "https://images.unsplash.com/photo-1492562080023-ab3db95bfbce?w=512&h=512&fit=crop",
-                "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=512&h=512&fit=crop",
-                "https://images.unsplash.com/photo-1544005313-94ddf0286df2?w=512&h=512&fit=crop",
-                "https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=512&h=512&fit=crop",
-                "https://images.unsplash.com/photo-1500648767791-00dcc994a43e?w=512&h=512&fit=crop",
-                "https://images.unsplash.com/photo-1573496359142-b8d87734a5a2?w=512&h=512&fit=crop"
-            ],
-            "gaming": [
-                "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=512&h=512&fit=crop",
-                "https://images.unsplash.com/photo-1566492031773-4f4e44671857?w=512&h=512&fit=crop",
-                "https://images.unsplash.com/photo-1607604276583-eef5d076aa5f?w=512&h=512&fit=crop"
-            ],
-            "social": [
-                "https://images.unsplash.com/photo-1614680376593-902f74fa0d41?w=512&h=512&fit=crop",
-                "https://images.unsplash.com/photo-1522075469751-3a6694fb2f61?w=512&h=512&fit=crop",
-                "https://images.unsplash.com/photo-1539571696357-5a69c17a67c6?w=512&h=512&fit=crop"
-            ],
-            "gaming-character": [
-                "https://images.unsplash.com/photo-1514888286974-6c03e2ca1dba?w=512&h=512&fit=crop",
-                "https://images.unsplash.com/photo-1518770660439-4636190af475?w=512&h=512&fit=crop",
-                "https://images.unsplash.com/photo-1509248961158-e54f6934749c?w=512&h=512&fit=crop"
-            ]
-        }
-        
-        urls = placeholders.get(category, placeholders["professional"])
-        
+
         avatars = []
-        for i in range(req.variations):
-            url = urls[i % len(urls)]
-            avatar_url = f"{url}&sig={request_id}_{i}"
+        for i, image_bytes in enumerate(raw_images):
+            watermarked = apply_watermark(image_bytes)
+            filename = f"{request_id}_{i}.png"
+            (AVATARS_DIR / filename).write_bytes(watermarked)
+
             avatar = GeneratedAvatar(
                 id=uuid.uuid4(),
                 request_id=request_id,
-                storage_key=f"avatars/{request_id}_{i}.png",
-                cdn_url=avatar_url,
+                storage_key=f"avatars/{filename}",
+                cdn_url=f"/media/avatars/{filename}",
                 resolution="512x512",
                 is_watermarked=True,
                 is_premium=False
             )
             db.add(avatar)
             avatars.append(avatar)
-            
+
         req.status = "completed"
         req.completed_at = func.now()
-        
-        # Deduct credit
+
+        # Deduct credit — solo se cobra si la generación se completó
         user = db.query(User).filter(User.id == req.user_id).first()
         if user:
             user.credits_used += 1
-            
+
         db.commit()
-        
+
         # Broadcast completed
         avatars_response = [
             {
@@ -156,7 +165,7 @@ async def generate_avatar_background(request_id: uuid.UUID):
                 "is_watermarked": a.is_watermarked
             } for a in avatars
         ]
-        
+
         await manager.broadcast(str(request_id), {
             "event": "generation_completed",
             "data": {
@@ -166,7 +175,7 @@ async def generate_avatar_background(request_id: uuid.UUID):
                 "credits_remaining": user.credits_limit - user.credits_used if user else 0
             }
         })
-        
+
     except Exception as e:
         print("Error in background generation:", e)
         try:
