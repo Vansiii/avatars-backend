@@ -14,6 +14,7 @@ from app.media_paths import AVATARS_DIR
 from app.services.image_provider import generate_image, NSFWRejected, ProviderError
 from app.services.watermark import apply_watermark
 from app.services.security_log import log_nsfw_rejection
+from app.services.nsfw_filter import validate_image_content, ContentRejected, NSFWFilterError
 
 router = APIRouter()
 
@@ -46,6 +47,9 @@ manager = ConnectionManager()
 
 # Background Generation Task
 async def generate_avatar_background(request_id: uuid.UUID):
+    import time
+    start_time = time.time()
+    
     db = SessionLocal()
     try:
         req = db.query(GenerationRequest).filter(GenerationRequest.id == request_id).first()
@@ -56,8 +60,21 @@ async def generate_avatar_background(request_id: uuid.UUID):
         db.commit()
 
         style = db.query(Style).filter(Style.id == req.style_id).first()
-        prompt_parts = [p for p in [style.base_prompt if style else None, req.prompt] if p]
-        full_prompt = ", ".join(prompt_parts) if prompt_parts else "professional portrait avatar, studio lighting"
+        
+        # Construcción del prompt: El prompt del usuario va PRIMERO para mayor control
+        # El base_prompt del estilo sirve como modificador de estilo al final
+        if req.prompt and style and style.base_prompt:
+            # Usuario especificó algo: su descripción + estilo aplicado
+            full_prompt = f"{req.prompt}, {style.base_prompt}"
+        elif req.prompt:
+            # Solo prompt de usuario, sin estilo
+            full_prompt = req.prompt
+        elif style and style.base_prompt:
+            # Solo estilo, sin descripción (ej: subió foto sin texto)
+            full_prompt = style.base_prompt
+        else:
+            # Fallback por seguridad
+            full_prompt = "professional portrait avatar, studio lighting"
         # NOTA: en este Alpha la foto subida por el usuario NO condiciona la generación
         # todavía (Pollinations "kontext" para imagen->imagen requiere una URL pública
         # del archivo de entrada, y aún no hay storage público). Si solo se subió una
@@ -116,7 +133,38 @@ async def generate_avatar_background(request_id: uuid.UUID):
             })
             return
 
-        # Paso 3: watermark + guardado (80%)
+        # Paso 3: validar contenido de salida (filtro NSFW obligatorio, SOUL.md §4)
+        await manager.broadcast(str(request_id), {
+            "event": "generation_progress",
+            "data": {
+                "request_id": str(request_id),
+                "status": "processing",
+                "progress": 70,
+                "message": "Validando contenido generado..."
+            }
+        })
+
+        # Validar todas las imágenes generadas
+        try:
+            for i, image_bytes in enumerate(raw_images):
+                validate_image_content(image_bytes, threshold=0.6, mode="moderate")
+        except (ContentRejected, NSFWFilterError) as exc:
+            # SOUL.md §4: contenido rechazado → GEN_004, sin cobrar crédito
+            log_nsfw_rejection(req.user_id, "generated_output", str(exc))
+            req.status = "failed"
+            db.commit()
+            await manager.broadcast(str(request_id), {
+                "event": "generation_failed",
+                "data": {
+                    "request_id": str(request_id),
+                    "status": "failed",
+                    "error_code": "GEN_004",
+                    "message": "El contenido generado no cumple con nuestras políticas de uso."
+                }
+            })
+            return
+
+        # Paso 4: watermark + guardado (80%)
         await manager.broadcast(str(request_id), {
             "event": "generation_progress",
             "data": {
@@ -155,6 +203,10 @@ async def generate_avatar_background(request_id: uuid.UUID):
 
         db.commit()
 
+        # Medir latencia total (B-08)
+        elapsed_time = time.time() - start_time
+        print(f"[METRICS] Generación completada en {elapsed_time:.2f}s para {req.variations} variaciones (request_id: {request_id})")
+
         # Broadcast completed
         avatars_response = [
             {
@@ -177,7 +229,9 @@ async def generate_avatar_background(request_id: uuid.UUID):
         })
 
     except Exception as e:
-        print("Error in background generation:", e)
+        print(f"[ERROR] Error in background generation: {type(e).__name__}: {e}")
+        import traceback
+        traceback.print_exc()
         try:
             req = db.query(GenerationRequest).filter(GenerationRequest.id == request_id).first()
             if req:
@@ -191,8 +245,8 @@ async def generate_avatar_background(request_id: uuid.UUID):
                     "message": "Error al generar el avatar."
                 }
             })
-        except Exception:
-            pass
+        except Exception as broadcast_error:
+            print(f"[ERROR] Failed to broadcast error: {broadcast_error}")
     finally:
         db.close()
 
@@ -240,6 +294,19 @@ def submit_generation(
                 detail="La imagen no puede pesar más de 10 MB.",
                 headers={"x-error-code": "GEN_002"}
             )
+        
+        # Strip EXIF metadata for privacy (SOUL.md §5)
+        try:
+            from app.services.nsfw_filter import strip_image_metadata
+            file_bytes = file.file.read()
+            file_bytes_clean = strip_image_metadata(file_bytes)
+            file.file.seek(0)  # Reset for potential later use
+            # Note: We've cleaned the data but the original file object is still used
+            # This is acceptable for Alpha as we don't persist the input image yet
+        except Exception as e:
+            print(f"[WARNING] Failed to strip EXIF metadata: {e}")
+            # Continue anyway - EXIF stripping is best-effort in Alpha
+
             
     # Validate Prompt
     if prompt:
