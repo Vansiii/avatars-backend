@@ -4,6 +4,7 @@ sqlalchemy
 alembic
 pydantic
 pydantic-settings
+email-validator
 python-jose[cryptography]
 passlib[bcrypt]
 python-multipart
@@ -11,3 +12,5 @@ psycopg2-binary
 pytest
 httpx
 pillow
+nudenet
+cloudinary
