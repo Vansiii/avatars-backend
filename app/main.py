@@ -4,6 +4,8 @@ from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 import asyncio
 
+import os
+
 from app.database.database import engine, Base, SessionLocal
 from app.database.seeding import seed_styles
 from app.media_paths import MEDIA_ROOT
@@ -52,15 +54,19 @@ app = FastAPI(
 
 # CORS configuration
 # SECURITY: In production, restrict to specific domains
-# For Alpha development, allowing localhost origins
+# Dev origins are always allowed; add production frontend URLs via
+# the CORS_ORIGINS env var (comma-separated, e.g. https://myapp.vercel.app)
+_dev_origins = [
+    "http://localhost:3000",
+    "http://localhost:5173",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:5173",
+]
+_extra_origins = [o.strip() for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://localhost:5173",
-        "http://127.0.0.1:3000",
-        "http://127.0.0.1:5173",
-    ],  # Frontend dev servers
+    allow_origins=_dev_origins + _extra_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

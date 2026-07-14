@@ -1,2 +1,5 @@
 .env
 app/media/
+__pycache__/
+*.pyc
+venv/
