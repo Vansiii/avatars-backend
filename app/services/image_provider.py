@@ -25,7 +25,7 @@ async def generate_image(prompt: str, width: int = 512, height: int = 512) -> by
         "width": width,
         "height": height,
         "nologo": "true",
-        "safe": "false",  # Desactivado temporalmente para testing - confiamos en el filtro local
+        "safe": "true",  # Seguridad activa: Pollinations filtra NSFW en entrada (SOUL.md §4)
         "private": "true",
     }
     headers = {}
@@ -39,19 +39,27 @@ async def generate_image(prompt: str, width: int = 512, height: int = 512) -> by
                 response = await client.get(url, params=params, headers=headers)
         except httpx.RequestError as exc:
             last_error = exc
-            await asyncio.sleep(2 ** attempt)
+            await asyncio.sleep(2**attempt)
             continue
 
-        if response.status_code == 200 and response.headers.get("content-type", "").startswith("image/"):
+        if response.status_code == 200 and response.headers.get(
+            "content-type", ""
+        ).startswith("image/"):
             return response.content
 
         if response.status_code in (400, 403, 422):
             # Pollinations no documenta el código exacto de rechazo para safe=true;
             # cualquier 4xx de bloqueo se trata como rechazo NSFW (fail-closed).
-            print(f"[WARNING] Pollinations rechazó el prompt: '{prompt}' (HTTP {response.status_code})")
-            raise NSFWRejected(f"Contenido rechazado por el filtro de seguridad (HTTP {response.status_code})")
+            print(
+                f"[WARNING] Pollinations rechazó el prompt: '{prompt}' (HTTP {response.status_code})"
+            )
+            raise NSFWRejected(
+                f"Contenido rechazado por el filtro de seguridad (HTTP {response.status_code})"
+            )
 
         last_error = ProviderError(f"Pollinations respondió {response.status_code}")
-        await asyncio.sleep(2 ** attempt)
+        await asyncio.sleep(2**attempt)
 
-    raise ProviderError(str(last_error) if last_error else "Fallo desconocido del proveedor de IA")
+    raise ProviderError(
+        str(last_error) if last_error else "Fallo desconocido del proveedor de IA"
+    )
