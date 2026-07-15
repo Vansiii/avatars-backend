@@ -34,8 +34,10 @@ async def create_redis_pool(redis_url: str, connect_timeout: int = 5) -> redis.R
         await client.ping()
     except Exception as exc:
         await client.aclose()
+        # Sanitize URL to avoid logging credentials
+        safe_url = redis_url.rsplit("@", 1)[-1] if "@" in redis_url else redis_url
         raise RedisUnavailable(
-            f"Cannot connect to Redis at {redis_url}: {exc}"
+            f"Cannot connect to Redis at {safe_url}: {exc}"
         ) from exc
 
     logger.info("Redis connection pool created and verified")
