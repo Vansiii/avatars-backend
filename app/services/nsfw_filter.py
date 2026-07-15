@@ -128,18 +128,16 @@ def validate_image_content(
             return True  # Sin detecciones = imagen segura
         
         # Categorías consideradas NSFW explícito
+        # Labels verificadas contra NudeDetector 3.4.2 (ver docs/verification/nudenet-contract.md)
         explicit_categories = {
-            "EXPOSED_ANUS",
-            "EXPOSED_BREAST_F",
-            "EXPOSED_GENITALIA_F",
-            "EXPOSED_GENITALIA_M",
-        }
-        
-        # Categorías consideradas sugestivas (solo en modo strict)
-        suggestive_categories = {
+            "ANUS_EXPOSED",
             "FEMALE_BREAST_EXPOSED",
             "FEMALE_GENITALIA_EXPOSED",
             "MALE_GENITALIA_EXPOSED",
+        }
+            
+        # Categorías consideradas sugestivas (solo en modo strict)
+        suggestive_categories = {
             "BUTTOCKS_EXPOSED",
         }
         

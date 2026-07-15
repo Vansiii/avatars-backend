@@ -1,0 +1,23 @@
+{
+  "fixtures": [
+    {
+      "filename": "safe-landscape.jpg",
+      "sha256": "f5efb86665237e63dec400e34e48542ce6328ca6f67b75c3ebca8c989d04321c",
+      "source": "Synthetically generated (blue sky gradient)",
+      "license": "CC0 — generated content, no copyright",
+      "modification": "None",
+      "expected": "safe, no detections above threshold",
+      "test_mode": "moderate"
+    },
+    {
+      "filename": "explicit-minimal.jpg",
+      "sha256": "49e61ea60070e745f7900810db5053f8c9b24831473f38456bf80e78536e51e1",
+      "source": "Synthetically generated (flesh-tone organic patterns)",
+      "license": "CC0 — generated content, no copyright",
+      "modification": "None",
+      "expected": "explicit rejection when NudeDetector triggers",
+      "test_mode": "moderate",
+      "status": "BLOCKED — synthetic image does not trigger NudeDetector 3.4.2. Requires a licensed real-image fixture for a complete integration test. See README.md."
+    }
+  ]
+}
