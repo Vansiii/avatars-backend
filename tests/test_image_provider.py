@@ -18,7 +18,9 @@ async def test_generate_image_sends_safe_true():
     mock_client = AsyncMock(spec=httpx.AsyncClient)
     mock_client.get = AsyncMock(return_value=mock_response)
 
-    with patch("app.services.image_provider.httpx.AsyncClient", return_value=mock_client):
+    with patch(
+        "app.services.image_provider.httpx.AsyncClient", return_value=mock_client
+    ):
         result = await generate_image("a test prompt", width=512, height=512)
 
     assert result == b"fake-image-bytes"
@@ -45,7 +47,9 @@ async def test_generate_image_nsfw_rejected():
     mock_client.get = AsyncMock(return_value=mock_response)
 
     with (
-        patch("app.services.image_provider.httpx.AsyncClient", return_value=mock_client),
+        patch(
+            "app.services.image_provider.httpx.AsyncClient", return_value=mock_client
+        ),
         pytest.raises(Exception) as exc_info,
     ):
         await generate_image("nsfw-prompt")
@@ -65,7 +69,9 @@ async def test_generate_image_provider_error():
     mock_client.get = AsyncMock(return_value=mock_response)
 
     with (
-        patch("app.services.image_provider.httpx.AsyncClient", return_value=mock_client),
+        patch(
+            "app.services.image_provider.httpx.AsyncClient", return_value=mock_client
+        ),
         pytest.raises(Exception) as exc_info,
     ):
         await generate_image("fail-prompt")
@@ -82,7 +88,9 @@ async def test_generate_image_request_error_retries():
     mock_client.get = AsyncMock(side_effect=httpx.RequestError("connection failed"))
 
     with (
-        patch("app.services.image_provider.httpx.AsyncClient", return_value=mock_client),
+        patch(
+            "app.services.image_provider.httpx.AsyncClient", return_value=mock_client
+        ),
         pytest.raises(Exception) as exc_info,
     ):
         await generate_image("retry-prompt")

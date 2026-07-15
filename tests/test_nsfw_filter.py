@@ -27,14 +27,16 @@ def _image_bytes(path: Path) -> bytes:
 
 # ─── Real-image integration tests (require NudeDetector model) ───
 
-pytestmark_model = pytest.mark.skipif(
+pytestmark = pytest.mark.skipif(
     not os.environ.get("RUN_NSFW_MODEL_TESTS"),
     reason="Set RUN_NSFW_MODEL_TESTS=1 and pre-provision the NudeDetector model to run model-dependent tests",
 )
 
 
 @pytest.mark.nsfw_model
-@pytest.mark.skipif(not SAFE_FIXTURE.exists(), reason="safe-landscape.jpg fixture not found")
+@pytest.mark.skipif(
+    not SAFE_FIXTURE.exists(), reason="safe-landscape.jpg fixture not found"
+)
 def test_safe_image_passes_moderate():
     """A benign image should pass validation in moderate mode."""
     result = validate_image_content(_image_bytes(SAFE_FIXTURE), mode="moderate")
@@ -42,7 +44,9 @@ def test_safe_image_passes_moderate():
 
 
 @pytest.mark.nsfw_model
-@pytest.mark.skipif(not EXPLICIT_FIXTURE.exists(), reason="explicit-minimal.jpg fixture not found")
+@pytest.mark.skipif(
+    not EXPLICIT_FIXTURE.exists(), reason="explicit-minimal.jpg fixture not found"
+)
 def test_explicit_image_raises_content_rejected():
     """
     An image with explicit content should raise ContentRejected in moderate mode.

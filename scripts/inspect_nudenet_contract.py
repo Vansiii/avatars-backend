@@ -80,6 +80,7 @@ def main():
 
     try:
         import nudenet
+
         print(f"[INFO] nudenet module location: {nudenet.__file__}", file=sys.stderr)
 
         detector = nudenet.NudeDetector()
@@ -96,11 +97,13 @@ def main():
         for p in sorted(dist_path.rglob("*")):
             if p.suffix in (".onnx", ".json", ".txt") and ".dist-info" not in str(p):
                 try:
-                    model_files.append({
-                        "path": str(p.relative_to(dist_path)),
-                        "size": p.stat().st_size,
-                        "sha256": sha256_of(p),
-                    })
+                    model_files.append(
+                        {
+                            "path": str(p.relative_to(dist_path)),
+                            "size": p.stat().st_size,
+                            "sha256": sha256_of(p),
+                        }
+                    )
                 except (OSError, ValueError):
                     pass
 
@@ -124,7 +127,13 @@ def main():
         report["model_labels"]["count"] = 0
 
     # --- Try a detect() call on a known benign file ---
-    fixture = Path(__file__).parent.parent / "tests" / "fixtures" / "nsfw" / "safe-landscape.jpg"
+    fixture = (
+        Path(__file__).parent.parent
+        / "tests"
+        / "fixtures"
+        / "nsfw"
+        / "safe-landscape.jpg"
+    )
     if fixture.exists():
         try:
             from nudenet import NudeDetector
