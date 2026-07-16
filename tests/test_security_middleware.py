@@ -78,3 +78,13 @@ class TestHealthEndpoint:
         assert response.status_code == 200
         data = response.json()
         assert "message" in data
+
+    def test_rate_limit_rejection_keeps_security_headers(self):
+        for _ in range(100):
+            client.get("/")
+
+        response = client.get("/")
+
+        assert response.status_code == 429
+        assert response.headers.get("x-content-type-options") == "nosniff"
+        assert response.headers.get("x-frame-options") == "DENY"

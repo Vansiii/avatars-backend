@@ -2,7 +2,7 @@ import asyncio
 import logging
 import os
 import sys
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,6 +13,7 @@ from app.database.database import engine, Base, SessionLocal
 from app.database.seeding import seed_styles
 from app.logging_config import configure_logging
 from app.media_paths import MEDIA_ROOT
+from app.middleware.degraded import enter_degraded, recover_redis
 from app.middleware.rate_limit import RateLimitMiddleware
 from app.middleware.request_context import RequestContextMiddleware
 from app.middleware.security_headers import SecurityHeadersMiddleware
@@ -34,6 +35,8 @@ logger = logging.getLogger(__name__)
 from app.models.user import User  # noqa: E402
 from app.models.style import Style  # noqa: E402
 from app.models.generation import GenerationRequest, GeneratedAvatar  # noqa: E402
+from app.models.session import Session  # noqa: E402
+from app.models.refresh_token import RefreshToken  # noqa: E402
 
 # Import API routers
 from app.api.v1.auth import router as auth_router  # noqa: E402
@@ -44,8 +47,6 @@ from app.api.v1.generations import router as generations_router  # noqa: E402
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # ── Startup ──
-
-    # 1. Verify database connectivity (Alembic manages schema)
     try:
         with engine.connect():
             pass
@@ -54,37 +55,59 @@ async def lifespan(app: FastAPI):
         logger.critical("Database connection failed", extra={"error": str(exc)})
         sys.exit(1)
 
-    # 2. Verify Alembic migration state
-
-    # 3. Initialize Redis connection
+    app.state.redis = None
+    app.state.degraded = False
     try:
         redis_client = await create_redis_pool(
             settings.REDIS_URL,
             connect_timeout=settings.REDIS_CONNECT_TIMEOUT,
         )
         set_redis(redis_client)
+        app.state.redis = redis_client
         logger.info("Redis connection established")
-    except RedisUnavailable as exc:
-        logger.critical("Redis unavailable, shutting down", extra={"error": str(exc)})
-        sys.exit(1)
+    except RedisUnavailable:
+        enter_degraded(app, reason="redis startup unavailable")
 
-    # 4. Seed initial styles catalog
+    async def recover_redis_loop() -> None:
+        while True:
+            await asyncio.sleep(30)
+            if not app.state.degraded:
+                continue
+            try:
+                await close_redis()
+                candidate = await create_redis_pool(
+                    settings.REDIS_URL,
+                    connect_timeout=settings.REDIS_CONNECT_TIMEOUT,
+                )
+                if await recover_redis(app, candidate):
+                    set_redis(candidate)
+                else:
+                    await candidate.aclose()
+            except Exception:
+                # Recovery remains best-effort; the shared helper preserves degraded state.
+                continue
+
     db = SessionLocal()
     try:
         seed_styles(db)
     finally:
         db.close()
 
-    # 5. Start background cleanup scheduler
     cleanup_task = asyncio.create_task(cleanup_scheduler(interval_hours=6))
-    logger.info("Background cleanup scheduler started (every 6 hours)")
+    recovery_task = asyncio.create_task(recover_redis_loop())
+    logger.info("Background cleanup and Redis recovery schedulers started")
 
-    yield
-
-    # ── Shutdown ──
-    cleanup_task.cancel()
-    await close_redis()
-    logger.info("Shutdown complete")
+    try:
+        yield
+    finally:
+        cleanup_task.cancel()
+        recovery_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await cleanup_task
+        with suppress(asyncio.CancelledError):
+            await recovery_task
+        await close_redis()
+        logger.info("Shutdown complete")
 
 
 app = FastAPI(
@@ -94,9 +117,20 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# ── Middleware stack (execution order: outermost first) ──
+# ── Middleware stack (the last registration executes outermost) ──
 
-# CORS (outermost, handles preflight before other middlewares)
+# Rate limiting is closest to the router so outer security middleware decorates 429s.
+app.add_middleware(
+    RateLimitMiddleware,
+    general_per_minute=settings.RATE_LIMIT_GENERAL_PER_MINUTE,
+    generation_per_minute=settings.RATE_LIMIT_GENERATION_PER_MINUTE,
+)
+
+# Security headers and request context also cover rate-limit rejections.
+app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(RequestContextMiddleware)
+
+# CORS is outermost so preflight remains available before API middleware.
 _dev_origins = [
     "http://localhost:3000",
     "http://localhost:5173",
@@ -106,26 +140,12 @@ _dev_origins = [
 _extra_origins = [
     o.strip() for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()
 ]
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_dev_origins + _extra_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-)
-
-# Security headers
-app.add_middleware(SecurityHeadersMiddleware)
-
-# Request context (request ID, contextvars)
-app.add_middleware(RequestContextMiddleware)
-
-# Rate limiting (closest to router)
-app.add_middleware(
-    RateLimitMiddleware,
-    requests_per_minute=settings.RATE_LIMIT_GENERAL_PER_MINUTE,
-    generation_requests_per_minute=settings.RATE_LIMIT_GENERATION_PER_MINUTE,
 )
 
 # ── Routes ──

@@ -23,6 +23,8 @@ from app.database.database import Base  # noqa: E402
 from app.models.user import User  # noqa: E402
 from app.models.style import Style  # noqa: E402
 from app.models.generation import GenerationRequest, GeneratedAvatar  # noqa: E402
+from app.models.refresh_token import RefreshToken  # noqa: E402
+from app.models.session import Session  # noqa: E402
 
 target_metadata = Base.metadata
 

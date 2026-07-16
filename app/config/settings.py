@@ -32,9 +32,10 @@ class Settings(BaseSettings):
     REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
     REDIS_CONNECT_TIMEOUT: int = 5
 
-    # Rate limiting
+    # Rate limiting and degraded Redis operation
     RATE_LIMIT_GENERAL_PER_MINUTE: int = 100
     RATE_LIMIT_GENERATION_PER_MINUTE: int = 20
+    DEGRADED_ACCESS_TOKEN_EXPIRE_MINUTES: int = 2
 
     # Security headers
     ENABLE_HSTS: bool = False
