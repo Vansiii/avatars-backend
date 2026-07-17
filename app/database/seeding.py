@@ -6,8 +6,10 @@ Ejecutar una vez:
 """
 
 from app.database.database import SessionLocal
-from app.models.models import User
+from app.models.models import User, SpotCategory
 from app.auth.auth_handler import get_password_hash
+
+DEFAULT_CATEGORIES = ["Deportes", "Noticias", "Entretenimiento"]
 
 
 def create_admin():
@@ -34,5 +36,25 @@ def create_admin():
         db.close()
 
 
+def seed_default_categories(db=None):
+    """Crea las categorías base (deportes/noticias/entretenimiento) si la tabla está vacía.
+
+    Sin esto, un despliegue nuevo no tiene categorías y nadie puede crear personajes
+    hasta que el admin las cargue a mano una por una.
+    """
+    owns_session = db is None
+    db = db or SessionLocal()
+    try:
+        if db.query(SpotCategory).count() > 0:
+            return
+        for name in DEFAULT_CATEGORIES:
+            db.add(SpotCategory(name=name))
+        db.commit()
+    finally:
+        if owns_session:
+            db.close()
+
+
 if __name__ == "__main__":
     create_admin()
+    seed_default_categories()

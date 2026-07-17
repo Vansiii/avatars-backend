@@ -21,6 +21,9 @@ class User(Base):
     role = mapped_column(String(10), nullable=False, default="user")
     is_active = mapped_column(Boolean, nullable=False, default=True)
     created_at = mapped_column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+    # Override de límites semanales por usuario (admin, SOUL.md §2). NULL = usa el default global.
+    characters_limit_override = mapped_column(Integer, nullable=True)
+    spots_limit_override = mapped_column(Integer, nullable=True)
 
     characters = relationship("Character", back_populates="user")
     spots = relationship("Spot", back_populates="user")

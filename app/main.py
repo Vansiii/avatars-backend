@@ -1,7 +1,9 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.config.settings import settings
 from app.database.database import Base, engine
+from app.database.seeding import seed_default_categories
 from app.api.v1.auth import router as auth_router
 from app.api.v1.admin import router as admin_router
 from app.api.v1.users import router as users_router
@@ -10,6 +12,7 @@ from app.api.v1.characters import router as characters_router
 
 # Crear tablas al arrancar (Alpha — en producción usar Alembic)
 Base.metadata.create_all(bind=engine)
+seed_default_categories()
 
 app = FastAPI(
     title="Avatares API",
@@ -19,7 +22,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=settings.cors_origins_list,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

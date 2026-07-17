@@ -1,11 +1,12 @@
-from datetime import datetime, timezone, timedelta
+import json
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from sqlalchemy.orm import Session
 
 from app.auth.dependencies import get_current_user
 from app.database.database import get_db
-from app.models.models import User, Character, CharacterLimit
+from app.models.models import User, Character, SpotCategory
 from app.schemas.character import (
     CharacterCreate,
     CharacterResponse,
@@ -15,40 +16,19 @@ from app.schemas.character import (
     CharacterVariation,
 )
 from app.services.image_provider import build_character_prompt, generate_character_variations
-from app.services.nsfw_filter import check_text_nsfw, check_image_bytes_nsfw, log_nsfw_rejection
+from app.services.limits import get_effective_limits, get_or_create_character_limit
+from app.services.nsfw_filter import (
+    check_text_nsfw,
+    check_image_bytes_nsfw,
+    check_generated_images_nsfw,
+    log_nsfw_rejection,
+)
 
 router = APIRouter(prefix="/api/v1/characters", tags=["characters"])
 
 MAX_IMAGE_SIZE = 10 * 1024 * 1024
 MIN_DESCRIPTION_LENGTH = 10
 MAX_DESCRIPTION_LENGTH = 500
-
-
-def get_week_start():
-    now = datetime.now(timezone.utc)
-    days_since_monday = now.weekday()
-    return (now - timedelta(days=days_since_monday)).replace(hour=0, minute=0, second=0, microsecond=0)
-
-
-def get_or_create_character_limit(db: Session, user_id: str) -> CharacterLimit:
-    week_start = get_week_start()
-    limits = db.query(CharacterLimit).filter(
-        CharacterLimit.user_id == user_id,
-        CharacterLimit.week_start >= week_start,
-    ).first()
-
-    if not limits:
-        limits = CharacterLimit(
-            user_id=user_id,
-            week_start=week_start,
-            characters_used=0,
-            spots_used=0,
-        )
-        db.add(limits)
-        db.commit()
-        db.refresh(limits)
-
-    return limits
 
 
 @router.post("", response_model=CharacterCreateResponse, status_code=201)
@@ -61,19 +41,21 @@ async def create_character(
     current_user: User = Depends(get_current_user),
 ):
     """Crea un nuevo personaje con 3 variaciones iniciales."""
+    characters_limit, _ = get_effective_limits(current_user)
     limits = get_or_create_character_limit(db, current_user.id)
-    if limits.characters_used >= 2:
+    if limits.characters_used >= characters_limit:
         raise HTTPException(
             status_code=403,
             detail="Límite semanal de personajes alcanzado",
             headers={"x-error-code": "CHAR_001"},
         )
 
-    valid_categories = ["deportes", "noticias", "entretenimiento"]
+    # Las categorías las gestiona el admin (SpotCategory); no hay lista fija.
+    valid_categories = [c.name.lower() for c in db.query(SpotCategory).all()]
     if category not in valid_categories:
         raise HTTPException(
             status_code=400,
-            detail=f"Categoría no válida. Opciones: {', '.join(valid_categories)}"
+            detail=f"Categoría no válida. Opciones: {', '.join(valid_categories) or 'ninguna configurada'}"
         )
 
     if description:
@@ -124,8 +106,14 @@ async def create_character(
 
     prompt = build_character_prompt(name=name, description=description, category=category)
     variations_urls = await generate_character_variations(prompt, count=3)
+    variations_urls = await check_generated_images_nsfw(variations_urls, current_user.id)
+    if not variations_urls:
+        raise HTTPException(
+            status_code=422,
+            detail="No se pudo generar contenido apto. Intente nuevamente.",
+            headers={"x-error-code": "GEN_004"},
+        )
 
-    import json
     consistency_data = json.dumps({
         "all_variations": variations_urls,  # Acumula todas las variaciones
         "current_batch": variations_urls,   # Lote actual
@@ -200,7 +188,6 @@ def select_variation(
     if character.status != "draft":
         raise HTTPException(status_code=400, detail="El personaje ya fue seleccionado")
 
-    import json
     try:
         data = json.loads(character.consistency_data) if character.consistency_data else {}
         all_variations = data.get("all_variations", [])
@@ -245,7 +232,6 @@ async def redo_character(
     if character.status != "draft":
         raise HTTPException(status_code=400, detail="El personaje ya fue seleccionado")
 
-    import json
     try:
         data = json.loads(character.consistency_data) if character.consistency_data else {}
         all_variations = data.get("all_variations", [])
@@ -267,6 +253,13 @@ async def redo_character(
         category=character.category,
     )
     new_variations = await generate_character_variations(prompt, count=3)
+    new_variations = await check_generated_images_nsfw(new_variations, current_user.id)
+    if not new_variations:
+        raise HTTPException(
+            status_code=422,
+            detail="No se pudo generar contenido apto. Intente nuevamente.",
+            headers={"x-error-code": "GEN_004"},
+        )
 
     # Acumular: agregar nuevas a las existentes
     all_variations = all_variations + new_variations
