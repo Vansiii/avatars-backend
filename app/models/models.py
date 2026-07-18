@@ -60,6 +60,8 @@ class Spot(Base):
     status = mapped_column(String(10), nullable=False, default="pending")
     output_url = mapped_column(String(500), nullable=True)
     duration_seconds = mapped_column(String(20), nullable=True)
+    # Variaciones en borrador antes de seleccionar (mismo patrón que Character.consistency_data)
+    variations_data = mapped_column(Text, nullable=True)
     created_at = mapped_column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
 
     character = relationship("Character", back_populates="spots")

@@ -9,6 +9,7 @@ from app.api.v1.admin import router as admin_router
 from app.api.v1.users import router as users_router
 from app.api.v1.categories import router as categories_router
 from app.api.v1.characters import router as characters_router
+from app.api.v1.spots import router as spots_router
 
 # Crear tablas al arrancar (Alpha — en producción usar Alembic)
 Base.metadata.create_all(bind=engine)
@@ -33,6 +34,7 @@ app.include_router(admin_router)
 app.include_router(users_router)
 app.include_router(categories_router)
 app.include_router(characters_router)
+app.include_router(spots_router)
 
 
 @app.get("/health")

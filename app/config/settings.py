@@ -10,6 +10,9 @@ class Settings(BaseSettings):
     # APIs externas
     LUMA_API_KEY: str = ""
     POLLINATIONS_API_KEY: str = ""
+    SHOTSTACK_API_KEY_SANDBOX: str = ""
+    SHOTSTACK_API_KEY_PRODUCTION: str = ""
+    SHOTSTACK_ENV: str = "sandbox"
 
     # Límites semanales por defecto (SOUL.md §3) — el admin puede sobreescribirlos por usuario
     DEFAULT_CHARACTERS_LIMIT: int = 2
