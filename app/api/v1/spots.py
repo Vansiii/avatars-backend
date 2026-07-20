@@ -15,14 +15,24 @@ from app.schemas.spot import (
     SpotVariation,
 )
 from app.services.video_provider import generate_spot_variations, DURATION_SECONDS
-from app.services.limits import get_effective_limits, get_or_create_character_limit
+from app.services.limits import get_or_create_character_limit
 from app.services.nsfw_filter import check_text_nsfw, log_nsfw_rejection
+from app.config.settings import settings
 
 router = APIRouter(prefix="/api/v1/spots", tags=["spots"])
 
-MIN_SCRIPT_LENGTH = 10
-MAX_SCRIPT_LENGTH = 500
 VALID_TYPES = {"short", "long"}
+
+# La duración real del video la marca el TTS del guión, no un parámetro de HeyGen
+# (ver video_provider.py) — pero antes el rango de caracteres era el mismo para
+# "short" y "long" (10-500), así que un spot "corto" podía llevar un guión de
+# 500 caracteres y salir bastante más largo que 3-5s, gastando más crédito real
+# del esperado. Rangos calculados a ritmo de narración natural (~2.5 palabras/s,
+# ~6 caracteres/palabra) para que el tipo elegido sí acote la duración/costo.
+SCRIPT_LENGTH_RANGES = {
+    "short": (10, 120),   # ~3-8s de narración
+    "long": (120, 500),   # ~8-30s de narración
+}
 
 
 def _get_owned_spot(db: Session, spot_id: str, user_id: str) -> Spot:
@@ -47,22 +57,13 @@ async def create_spot(
     current_user: User = Depends(get_current_user),
 ):
     """Genera 3 variaciones de un spot de video a partir de un personaje ya activo."""
-    _, spots_limit = get_effective_limits(current_user)
-    limits = get_or_create_character_limit(db, current_user.id)
-    if limits.spots_used >= spots_limit:
-        raise HTTPException(
-            status_code=403,
-            detail="Límite semanal de spots alcanzado",
-            headers={"x-error-code": "VID_001"},
-        )
-
     character = db.query(Character).filter(
         Character.id == request.character_id,
         Character.user_id == current_user.id,
     ).first()
     if not character:
         raise HTTPException(status_code=404, detail="Personaje no encontrado")
-    if character.status != "active" or not character.reference_image_url:
+    if character.status != "active" or not (character.heygen_avatar_id or character.reference_image_url):
         raise HTTPException(
             status_code=400,
             detail="El personaje debe estar activo (con una variación seleccionada) para generar spots",
@@ -71,10 +72,11 @@ async def create_spot(
     if request.type not in VALID_TYPES:
         raise HTTPException(status_code=400, detail="Tipo de video inválido. Use 'short' o 'long'")
 
-    if len(request.script) < MIN_SCRIPT_LENGTH or len(request.script) > MAX_SCRIPT_LENGTH:
+    min_len, max_len = SCRIPT_LENGTH_RANGES[request.type]
+    if len(request.script) < min_len or len(request.script) > max_len:
         raise HTTPException(
             status_code=400,
-            detail=f"El guión debe tener entre {MIN_SCRIPT_LENGTH} y {MAX_SCRIPT_LENGTH} caracteres",
+            detail=f"Para un spot '{request.type}', el guión debe tener entre {min_len} y {max_len} caracteres",
             headers={"x-error-code": "GEN_001"},
         )
 
@@ -88,7 +90,10 @@ async def create_spot(
         )
 
     variations_urls = await generate_spot_variations(
-        character.reference_image_url, request.script, request.type, count=3
+        character.reference_image_url, request.script, request.type,
+        count=settings.HEYGEN_SPOT_VARIATIONS,
+        voice_id=character.heygen_voice_id,
+        avatar_id=character.heygen_avatar_id,
     )
 
     spot = Spot(
@@ -176,7 +181,10 @@ async def redo_spot(
 
     character = db.query(Character).filter(Character.id == spot.character_id).first()
     new_variations = await generate_spot_variations(
-        character.reference_image_url, spot.script, spot.type, count=3
+        character.reference_image_url, spot.script, spot.type,
+        count=settings.HEYGEN_SPOT_VARIATIONS,
+        voice_id=character.heygen_voice_id,
+        avatar_id=character.heygen_avatar_id,
     )
 
     all_variations = all_variations + new_variations

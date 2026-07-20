@@ -1,148 +1,135 @@
-import json
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, Response, UploadFile, File, Form
 from sqlalchemy.orm import Session
 
 from app.auth.dependencies import get_current_user
 from app.database.database import get_db
 from app.models.models import User, Character, SpotCategory
 from app.schemas.character import (
-    CharacterCreate,
     CharacterResponse,
-    CharacterSelectRequest,
-    CharacterCreateResponse,
-    CharacterRedoResponse,
-    CharacterVariation,
+    CharacterVoiceRequest,
+    HeygenVoice,
+    CharacterFromPhotoResponse,
+    HeygenCatalogResponse,
+    CharacterConfirmRequest,
 )
-from app.services.image_provider import build_character_prompt, generate_character_variations
-from app.services.limits import get_effective_limits, get_or_create_character_limit
-from app.services.nsfw_filter import (
-    check_text_nsfw,
-    check_image_bytes_nsfw,
-    check_generated_images_nsfw,
-    log_nsfw_rejection,
+from app.services.video_provider import (
+    list_spanish_voices,
+    fetch_voice_preview,
+    create_avatar_from_photo,
+    list_public_avatar_looks,
 )
+from app.services.limits import get_or_create_character_limit
+from app.services.nsfw_filter import check_image_bytes_nsfw, check_image_url_nsfw, log_nsfw_rejection
 
 router = APIRouter(prefix="/api/v1/characters", tags=["characters"])
 
 MAX_IMAGE_SIZE = 10 * 1024 * 1024
-MIN_DESCRIPTION_LENGTH = 10
-MAX_DESCRIPTION_LENGTH = 500
+VALID_IMAGE_FORMATS = ["image/jpeg", "image/png", "image/webp"]
 
 
-@router.post("", response_model=CharacterCreateResponse, status_code=201)
-async def create_character(
+def _valid_categories(db: Session) -> list[str]:
+    # Las categorías las gestiona el admin (SpotCategory); no hay lista fija.
+    return [c.name.lower() for c in db.query(SpotCategory).all()]
+
+
+@router.post("/create-from-photo", response_model=CharacterFromPhotoResponse, status_code=201)
+async def create_from_photo(
     name: str = Form(...),
-    description: str | None = Form(None),
     category: str = Form(...),
-    file: UploadFile | None = File(None),
+    file: UploadFile = File(...),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Crea un nuevo personaje con 3 variaciones iniciales."""
-    characters_limit, _ = get_effective_limits(current_user)
-    limits = get_or_create_character_limit(db, current_user.id)
-    if limits.characters_used >= characters_limit:
-        raise HTTPException(
-            status_code=403,
-            detail="Límite semanal de personajes alcanzado",
-            headers={"x-error-code": "CHAR_001"},
-        )
+    """Crea un avatar animable de HeyGen a partir de una foto propia.
 
-    # Las categorías las gestiona el admin (SpotCategory); no hay lista fija.
-    valid_categories = [c.name.lower() for c in db.query(SpotCategory).all()]
-    if category not in valid_categories:
+    A diferencia del flujo viejo (Pollinations, 3 variaciones gratis), esto
+    es UN solo resultado determinístico que consume crédito real de HeyGen —
+    por eso NO se persiste como Character acá. El frontend muestra el
+    resultado y el usuario confirma con `POST /confirm` (o lo descarta sin
+    dejar rastro en la DB).
+    """
+    if category not in _valid_categories(db):
+        valid = ", ".join(_valid_categories(db)) or "ninguna configurada"
+        raise HTTPException(status_code=400, detail=f"Categoría no válida. Opciones: {valid}")
+
+    if file.content_type not in VALID_IMAGE_FORMATS:
         raise HTTPException(
             status_code=400,
-            detail=f"Categoría no válida. Opciones: {', '.join(valid_categories) or 'ninguna configurada'}"
+            detail="Formato de imagen no soportado. Use JPEG, PNG o WEBP",
+            headers={"x-error-code": "GEN_001"},
         )
-
-    if description:
-        if len(description) < MIN_DESCRIPTION_LENGTH:
-            raise HTTPException(
-                status_code=400,
-                detail=f"La descripción debe tener al menos {MIN_DESCRIPTION_LENGTH} caracteres",
-                headers={"x-error-code": "GEN_001"},
-            )
-        if len(description) > MAX_DESCRIPTION_LENGTH:
-            raise HTTPException(
-                status_code=400,
-                detail=f"La descripción no puede superar {MAX_DESCRIPTION_LENGTH} caracteres",
-                headers={"x-error-code": "GEN_001"},
-            )
-        is_safe = await check_text_nsfw(description)
-        if not is_safe:
-            log_nsfw_rejection("text", "description contains NSFW content", current_user.id)
-            raise HTTPException(
-                status_code=422,
-                detail="El contenido de la descripción no es apto",
-                headers={"x-error-code": "GEN_004"},
-            )
-
-    if file:
-        valid_formats = ["image/jpeg", "image/png", "image/webp"]
-        if file.content_type not in valid_formats:
-            raise HTTPException(
-                status_code=400,
-                detail="Formato de imagen no soportado. Use JPEG, PNG o WEBP",
-                headers={"x-error-code": "GEN_001"},
-            )
-        image_bytes = await file.read()
-        if len(image_bytes) > MAX_IMAGE_SIZE:
-            raise HTTPException(
-                status_code=400,
-                detail="La imagen no puede superar 10 MB",
-                headers={"x-error-code": "GEN_002"},
-            )
-        is_safe = await check_image_bytes_nsfw(image_bytes)
-        if not is_safe:
-            log_nsfw_rejection("image", "uploaded image flagged as NSFW", current_user.id)
-            raise HTTPException(
-                status_code=422,
-                detail="La imagen subida no es apta",
-                headers={"x-error-code": "GEN_004"},
-            )
-
-    prompt = build_character_prompt(name=name, description=description, category=category)
-    variations_urls = await generate_character_variations(prompt, count=3)
-    variations_urls = await check_generated_images_nsfw(variations_urls, current_user.id)
-    if not variations_urls:
+    image_bytes = await file.read()
+    if len(image_bytes) > MAX_IMAGE_SIZE:
+        raise HTTPException(
+            status_code=400,
+            detail="La imagen no puede superar 10 MB",
+            headers={"x-error-code": "GEN_002"},
+        )
+    is_safe = await check_image_bytes_nsfw(image_bytes)
+    if not is_safe:
+        log_nsfw_rejection("image", "uploaded image flagged as NSFW", current_user.id)
         raise HTTPException(
             status_code=422,
-            detail="No se pudo generar contenido apto. Intente nuevamente.",
+            detail="La imagen subida no es apta",
             headers={"x-error-code": "GEN_004"},
         )
 
-    consistency_data = json.dumps({
-        "all_variations": variations_urls,  # Acumula todas las variaciones
-        "current_batch": variations_urls,   # Lote actual
-        "redos_used": 0,
-    })
+    result = await create_avatar_from_photo(name, image_bytes, file.content_type)
+
+    # SOUL.md §6: valida también la SALIDA, no solo la entrada.
+    is_safe = await check_image_url_nsfw(result["preview_image_url"])
+    if not is_safe:
+        log_nsfw_rejection("generated_image", "heygen avatar flagged as NSFW", current_user.id)
+        raise HTTPException(
+            status_code=422,
+            detail="No se pudo generar contenido apto. Intente con otra foto.",
+            headers={"x-error-code": "GEN_004"},
+        )
+
+    return CharacterFromPhotoResponse(**result)
+
+
+@router.get("/heygen-catalog", response_model=HeygenCatalogResponse)
+async def get_heygen_catalog(token: str | None = None, current_user: User = Depends(get_current_user)):
+    """Catálogo público de avatares de HeyGen, para elegir uno existente en vez de crear uno nuevo."""
+    return await list_public_avatar_looks(token=token)
+
+
+@router.post("/confirm", response_model=CharacterResponse, status_code=201)
+def confirm_character(
+    request: CharacterConfirmRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Persiste el personaje elegido (por foto propia o catálogo) como activo.
+
+    Es acá donde se cuenta contra el uso semanal (métricas para el admin,
+    SOUL.md §3) — ya no bloquea la creación (uso interno de Canal 11 TVU).
+    """
+    if request.category not in _valid_categories(db):
+        valid = ", ".join(_valid_categories(db)) or "ninguna configurada"
+        raise HTTPException(status_code=400, detail=f"Categoría no válida. Opciones: {valid}")
 
     character = Character(
         user_id=current_user.id,
-        name=name,
-        description=description,
-        category=category,
-        status="draft",
-        consistency_data=consistency_data,
+        name=request.name,
+        category=request.category,
+        status="active",
+        reference_image_url=request.preview_image_url,
+        generated_image_url=request.preview_image_url,
+        heygen_avatar_id=request.avatar_id,
+        heygen_avatar_group_id=request.avatar_group_id,
     )
     db.add(character)
+
+    limits = get_or_create_character_limit(db, current_user.id)
+    limits.characters_used += 1
+
     db.commit()
     db.refresh(character)
-
-    variations = [
-        CharacterVariation(index=i, image_url=url)
-        for i, url in enumerate(variations_urls)
-    ]
-
-    return CharacterCreateResponse(
-        character_id=character.id,
-        variations=variations,
-        redos_remaining=3,
-        estimated_seconds=30,
-    )
+    return character
 
 
 @router.get("", response_model=list[CharacterResponse])
@@ -152,6 +139,51 @@ def list_characters(
 ):
     """Lista los personajes del usuario actual."""
     return db.query(Character).filter(Character.user_id == current_user.id).all()
+
+
+@router.get("/heygen-voices", response_model=list[HeygenVoice])
+async def get_heygen_voices(current_user: User = Depends(get_current_user)):
+    """Catálogo de voces en español de HeyGen para elegir la voz de un personaje."""
+    return await list_spanish_voices()
+
+
+@router.get("/voice-preview")
+async def get_voice_preview(url: str):
+    """Proxy del audio de preview de una voz de HeyGen (corrige el Content-Type,
+    ver docstring de `fetch_voice_preview`). Sin auth a propósito: son clips
+    públicos del catálogo de HeyGen, no datos del usuario — así el `<audio>`
+    del frontend puede usar la URL directo, sin manejar el header de auth.
+    """
+    try:
+        audio = await fetch_voice_preview(url)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="URL de preview no válida")
+    return Response(content=audio, media_type="audio/mpeg")
+
+
+@router.patch("/{character_id}/voice", response_model=CharacterResponse)
+def set_character_voice(
+    character_id: str,
+    request: CharacterVoiceRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Fija la voz de HeyGen del personaje — se reutiliza en todos sus spots
+    (misma idea que reference_image_url: consistencia del personaje, SOUL.md §4).
+    """
+    character = db.query(Character).filter(
+        Character.id == character_id,
+        Character.user_id == current_user.id,
+    ).first()
+    if not character:
+        raise HTTPException(status_code=404, detail="Personaje no encontrado")
+
+    character.heygen_voice_id = request.voice_id
+    character.heygen_voice_name = request.voice_name
+    character.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(character)
+    return character
 
 
 @router.get("/{character_id}", response_model=CharacterResponse)
@@ -168,117 +200,3 @@ def get_character(
     if not character:
         raise HTTPException(status_code=404, detail="Personaje no encontrado")
     return character
-
-
-@router.post("/{character_id}/select", response_model=CharacterResponse)
-def select_variation(
-    character_id: str,
-    request: CharacterSelectRequest,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """Selecciona una variación del personaje. Solo al seleccionar se decrementa el límite."""
-    character = db.query(Character).filter(
-        Character.id == character_id,
-        Character.user_id == current_user.id,
-    ).first()
-    if not character:
-        raise HTTPException(status_code=404, detail="Personaje no encontrado")
-
-    if character.status != "draft":
-        raise HTTPException(status_code=400, detail="El personaje ya fue seleccionado")
-
-    try:
-        data = json.loads(character.consistency_data) if character.consistency_data else {}
-        all_variations = data.get("all_variations", [])
-    except (json.JSONDecodeError, TypeError):
-        all_variations = []
-
-    if request.variation_index < 0 or request.variation_index >= len(all_variations):
-        raise HTTPException(status_code=400, detail="Índice de variación inválido")
-
-    character.generated_image_url = all_variations[request.variation_index]
-    character.reference_image_url = all_variations[request.variation_index]
-    character.status = "active"
-    character.updated_at = datetime.now(timezone.utc)
-
-    limits = get_or_create_character_limit(db, current_user.id)
-    limits.characters_used += 1
-
-    db.commit()
-    db.refresh(character)
-
-    return character
-
-
-@router.post("/{character_id}/redo", response_model=CharacterRedoResponse)
-async def redo_character(
-    character_id: str,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """
-    Genera 3 nuevas variaciones y las agrega a las existentes.
-
-    El usuario puede elegir de TODAS las variaciones (anteriores + nuevas).
-    """
-    character = db.query(Character).filter(
-        Character.id == character_id,
-        Character.user_id == current_user.id,
-    ).first()
-    if not character:
-        raise HTTPException(status_code=404, detail="Personaje no encontrado")
-
-    if character.status != "draft":
-        raise HTTPException(status_code=400, detail="El personaje ya fue seleccionado")
-
-    try:
-        data = json.loads(character.consistency_data) if character.consistency_data else {}
-        all_variations = data.get("all_variations", [])
-        redos_used = data.get("redos_used", 0)
-    except (json.JSONDecodeError, TypeError):
-        all_variations = []
-        redos_used = 0
-
-    if redos_used >= 3:
-        raise HTTPException(
-            status_code=400,
-            detail="Máximo 3 rehacers alcanzados. Debe seleccionar una variación."
-        )
-
-    # Generar 3 nuevas variaciones
-    prompt = build_character_prompt(
-        name=character.name,
-        description=character.description,
-        category=character.category,
-    )
-    new_variations = await generate_character_variations(prompt, count=3)
-    new_variations = await check_generated_images_nsfw(new_variations, current_user.id)
-    if not new_variations:
-        raise HTTPException(
-            status_code=422,
-            detail="No se pudo generar contenido apto. Intente nuevamente.",
-            headers={"x-error-code": "GEN_004"},
-        )
-
-    # Acumular: agregar nuevas a las existentes
-    all_variations = all_variations + new_variations
-
-    character.consistency_data = json.dumps({
-        "all_variations": all_variations,
-        "current_batch": new_variations,
-        "redos_used": redos_used + 1,
-    })
-    db.commit()
-
-    # Retornar TODAS las variaciones (anteriores + nuevas)
-    all_indexed = [
-        CharacterVariation(index=i, image_url=url)
-        for i, url in enumerate(all_variations)
-    ]
-
-    return CharacterRedoResponse(
-        character_id=character.id,
-        variations=all_indexed,
-        redos_remaining=3 - (redos_used + 1),
-    )

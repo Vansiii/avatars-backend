@@ -2,7 +2,7 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 
-from app.auth.auth_handler import decode_access_token
+from app.auth.auth_handler import decode_token
 from app.database.database import get_db
 from app.models.models import User
 
@@ -15,8 +15,12 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
         detail="Credenciales inválidas",
         headers={"WWW-Authenticate": "Bearer"},
     )
-    payload = decode_access_token(token)
+    payload = decode_token(token)
     if payload is None:
+        raise credentials_exception
+    if payload.get("type") != "access":
+        # Rechaza un refresh token usado directamente como access token
+        # (viven 7 días, no deberían servir para llamar a la API).
         raise credentials_exception
     user_id: str | None = payload.get("sub")
     if user_id is None:

@@ -37,11 +37,24 @@ class Character(Base):
     user_id = mapped_column(String(36), ForeignKey("users.id"), nullable=False)
     name = mapped_column(String(255), nullable=False)
     description = mapped_column(Text, nullable=True)
-    reference_image_url = mapped_column(String(500), nullable=True)
-    generated_image_url = mapped_column(String(500), nullable=True)
+    # Text (no VARCHAR): las URLs firmadas de HeyGen (CloudFront, con
+    # Signature/Key-Pair-Id) superan fácil los 500 caracteres.
+    reference_image_url = mapped_column(Text, nullable=True)
+    generated_image_url = mapped_column(Text, nullable=True)
     category = mapped_column(String(20), nullable=False)
     status = mapped_column(String(10), nullable=False, default="draft")
     consistency_data = mapped_column(Text, nullable=True)
+    # Voz de HeyGen elegida para este personaje (misma voz en todos sus spots,
+    # igual que reference_image_url — consistencia del personaje, SOUL.md §4).
+    # NULL = video_provider auto-descubre una voz en español por defecto.
+    heygen_voice_id = mapped_column(String(100), nullable=True)
+    heygen_voice_name = mapped_column(String(255), nullable=True)
+    # Identidad del personaje en HeyGen (foto propia animada o elegido del
+    # catálogo público) — reemplaza a reference_image_url como fuente de
+    # verdad para generar spots (SOUL.md §4). NULL en personajes creados
+    # antes de este cambio, que siguen usando reference_image_url.
+    heygen_avatar_id = mapped_column(String(100), nullable=True)
+    heygen_avatar_group_id = mapped_column(String(100), nullable=True)
     created_at = mapped_column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
     updated_at = mapped_column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
 
@@ -58,7 +71,9 @@ class Spot(Base):
     script = mapped_column(Text, nullable=False)
     type = mapped_column(String(10), nullable=False)
     status = mapped_column(String(10), nullable=False, default="pending")
-    output_url = mapped_column(String(500), nullable=True)
+    # Text (no VARCHAR): las URLs firmadas de HeyGen (CloudFront, con
+    # Signature/Key-Pair-Id) superan fácil los 500 caracteres.
+    output_url = mapped_column(Text, nullable=True)
     duration_seconds = mapped_column(String(20), nullable=True)
     # Variaciones en borrador antes de seleccionar (mismo patrón que Character.consistency_data)
     variations_data = mapped_column(Text, nullable=True)
